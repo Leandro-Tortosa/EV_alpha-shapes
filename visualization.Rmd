@@ -1,0 +1,235 @@
+---
+title: "Alpha-Shapes for an EV charging network"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    social: menu
+    source_code: embed
+runtime: shiny
+---
+
+```{r global, include=FALSE}
+library(alphahull)
+library(leaflet)
+library(leaflet.providers)
+library(plotly)
+library(maptools)
+library(sp)
+library(dplyr)
+library(shiny)
+library(osmdata)
+library(sf)
+library(rgdal)
+library(rgeos)
+
+# Import data CSV
+gasolineras_df <- read.csv("Data/Gasolineras-CV.csv")
+carga_df <- read.csv("Data/Charging-CV.csv")
+
+# Coordinates
+coordenadas <- data.frame(
+  Longitud = gasolineras_df$x,
+  Latitud = gasolineras_df$y
+  
+)
+
+# Define the geografic system that uses osmdata (WGS84)
+coordenadas_sp <- SpatialPointsDataFrame(
+  coords = coordenadas,
+  data = coordenadas,
+  proj4string = CRS("+proj=longlat +datum=WGS84")
+)
+
+# Transform geographic coordinates to UTM coordinates
+gasolineras_utm <- spTransform(coordenadas_sp, CRS("+proj=utm +zone=30 +datum=WGS84"))
+
+gasolineras_utm <- data.frame(
+  x = gasolineras_utm$Longitud,
+  y = gasolineras_utm$Latitud
+)
+
+# Original coordinates
+coordenadas <- data.frame(
+  Longitud = carga_df$x,
+  Latitud = carga_df$y
+  
+)
+
+# Define the geografic system that uses osmdata (WGS84)
+coordenadas_sp <- SpatialPointsDataFrame(
+  coords = coordenadas,
+  data = coordenadas,
+  proj4string = CRS("+proj=longlat +datum=WGS84")
+)
+
+# Transform geographic coordinates to UTM coordinates
+carga_utm <- spTransform(coordenadas_sp, CRS("+proj=utm +zone=30 +datum=WGS84"))
+
+carga_utm <- data.frame(
+  x = carga_utm$Longitud,
+  y = carga_utm$Latitud
+)
+```
+
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+sliderInput("alpha", "Alpha:", min = 0, max = 20000, value = 10000, step = 2000)
+```
+
+Column
+-----------------------------------------------------------------------
+
+### Mapa
+
+```{r}
+renderLeaflet({ 
+    
+    # Value for alpha
+    alpha_value <- input$alpha
+    ashape.gas <- ashape(gasolineras_utm, alpha = alpha_value) # gasolineras
+    ashape.car <- ashape(carga_utm, alpha = alpha_value) # Puntos de Carga
+    
+    
+    
+    # Gas stations
+    
+    df.gas <- as.data.frame(ashape.gas$edges)
+    
+    # Realizamos todas las transformaciones para poder representarlo en leaflet
+    # craete a column with unique id's per event-location combination
+    df.gas <- df.gas %>% mutate( id = row_number() )
+    #create a temporaty df with events
+    events.df.gas <- df.gas %>% 
+      select( id, y1, x1) %>% 
+      rename( latitude = y1, longitude = x1)
+    #create a temporaty df with locations
+    locations.df.gas <- df.gas %>% 
+      select( id, y2, x2) %>%
+      rename( latitude = y2, longitude = x2)
+    #merge the two temp.df's together 
+    df.gas.sp <- bind_rows( events.df.gas, locations.df.gas )
+    
+    # Transform utm t Latitude and Longitude
+    utm_data <- data.frame(x = df.gas.sp$longitude, y = df.gas.sp$latitude)
+    # Especifica el sistema de referencia de coordenadas UTM
+    utm_crs <- st_crs("+proj=utm +zone=30 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+    # Crea un objeto sf con las coordenadas UTM y su sistema de referencia
+    utm_sf <- st_as_sf(utm_data, coords = c("x", "y"), crs = utm_crs)
+    
+    # Transform UTM coordinates to WGS84 (latitude y longitude)
+    wgs84_sf <- st_transform(utm_sf, "+proj=longlat +datum=WGS84")
+    
+    wgs84_sf <- st_coordinates(wgs84_sf)
+    
+    df.gas.sp <- data.frame(id = df.gas$id,
+                         longitude = wgs84_sf[,"X"],
+                         latitude = wgs84_sf[,"Y"]
+    )
+    
+    #make df.sp a spatialdataframe
+    coordinates( df.gas.sp ) <- c( "longitude", "latitude" )
+    
+    #create a list per id
+    id.list <- sp::split( df.gas.sp, df.gas.sp[["id"]] )
+    
+    #initialisation of counter
+    id <- 1
+    
+    #for each id, create a line that connects all points with that id
+    for ( i in id.list ) {
+      event.lines <- SpatialLines( list( Lines( Line( i[1]@coords ), ID = id ) ),
+                                   proj4string = CRS( "+init=epsg:4326" ) )
+      if ( id == 1 ) {
+        sp_lines_gas  <- event.lines
+      } else {
+        sp_lines_gas  <- spRbind( sp_lines_gas, event.lines )
+      }
+      id <- id + 1
+    }
+    
+    # Charging points
+    
+    df.car <- as.data.frame(ashape.car$edges)
+    
+    # Realizamos todas las transformaciones para poder representarlo en leaflet
+    # craete a column with unique id's per event-location combination
+    df.car <- df.car %>% mutate( id = row_number() )
+    #create a temporaty df with events
+    events.df.car <- df.car %>% 
+      select( id, y1, x1) %>% 
+      rename( latitude = y1, longitude = x1)
+    #create a temporaty df with locations
+    locations.df.car <- df.car %>% 
+      select( id, y2, x2) %>%
+      rename( latitude = y2, longitude = x2)
+    #merge the two temp.df's together 
+    df.car.sp <- bind_rows( events.df.car, locations.df.car )
+    
+    # Pasar de utm a Latitud y Longitud real
+    utm_data <- data.frame(x = df.car.sp$longitude, y = df.car.sp$latitude)
+    # Especifica el sistema de referencia de coordenadas UTM
+    utm_crs <- st_crs("+proj=utm +zone=30 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+    # Crea un objeto sf con las coordenadas UTM y su sistema de referencia
+    utm_sf <- st_as_sf(utm_data, coords = c("x", "y"), crs = utm_crs)
+    
+    # Transform UTM coordinatezs to WGS84 (latitud y longitud)
+    wgs84_sf <- st_transform(utm_sf, "+proj=longlat +datum=WGS84")
+    
+    wgs84_sf <- st_coordinates(wgs84_sf)
+    
+    df.car.sp <- data.frame(id = df.car$id,
+                         longitude = wgs84_sf[,"X"],
+                         latitude = wgs84_sf[,"Y"]
+    )
+    
+    #make df.sp a spatialdataframe
+    coordinates( df.car.sp ) <- c( "longitude", "latitude" )
+    
+    #create a list per id
+    id.list <- sp::split( df.car.sp, df.car.sp[["id"]] )
+    
+    #initialisation of counter
+    id <- 1
+    
+    #for each id, create a line that connects all points with that id
+    for ( i in id.list ) {
+      event.lines <- SpatialLines( list( Lines( Line( i[1]@coords ), ID = id ) ),
+                                   proj4string = CRS( "+init=epsg:4326" ) )
+      if ( id == 1 ) {
+        sp_lines_car  <- event.lines
+      } else {
+        sp_lines_car  <- spRbind( sp_lines_car, event.lines )
+      }
+      id <- id + 1
+    }
+      
+    map <- leaflet() %>%
+      # Base groups
+      addTiles(group = "Generic") %>%
+      addProviderTiles(providers$Esri.WorldGrayCanvas, group = "Day") %>%
+      addProviderTiles(providers$CartoDB.DarkMatter, group = "Night") %>%
+      # Overlay groups
+      addCircles(data = gasolineras_df, lng = ~x, lat = ~y, radius=10, color="blue", group = "Gas stations", popup = paste("Longitud:",gasolineras_df$x , "<br>", "Latitud:",gasolineras_df$y)) %>%
+      addCircles(data = carga_df, lng = ~x, lat = ~y, radius=10, color="red", group = "Charging points", popup = paste("Longitud:",carga_df$x , "<br>", "Latitud:",carga_df$y)) %>%
+      addCircles(df.gas.sp,lng = df.gas.sp$longitude, lat =df.gas.sp$latitude , radius=8, color = "blue", group = "Gas alpha-shape", popup = paste("Longitud:",df.gas.sp$longitude , "<br>", "Latitud:",df.gas.sp$latitude )) %>%
+      addPolylines(data = sp_lines_gas, weight = 1, color = "blue", group = "Gas alpha-shape") %>%
+      addCircles(df.car.sp,lng = df.car.sp$longitude, lat = df.car.sp$latitude , radius=8, color = "red", group = "Charging alpha-shape", popup = paste("Longitud:",df.car.sp$longitude , "<br>", "Latitud:",df.car.sp$latitude )) %>%
+      addPolylines(data = sp_lines_car, weight = 1, color = "red",  group ="Charging alpha-shape")
+    
+    # Layers control
+    map <- map %>%
+      addLayersControl(
+        baseGroups = c("Generic", "Day", "Night"),
+        overlayGroups = c("Gas stations","Charging points", "Gas alpha-shape", "Charging alpha-shape"),
+        options = layersControlOptions(collapsed = FALSE, position = "bottomright")
+      )
+    
+    # Return the leaflet map
+    return(map)
+      
+    
+  })
+```
